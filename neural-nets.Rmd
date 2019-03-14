@@ -1,0 +1,270 @@
+---
+title: "Neural Networks"
+author: "Vlad Tarko"
+date: "March 13, 2019"
+output:
+  html_document:
+    theme: yeti
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(caret)
+library(neuralnet)
+```
+
+## Data preparation
+
+Let's use the `Boston` dataset from the `MASS` package, and suppose we want to predict the median value of houses (last variable) based on the other available variables.
+
+| Variable | Description |
+|----------|-------------|
+| `crim`   | per capita crime rate by town | 
+| `zn`     | proportion of residential land zoned for lots over 25,000 sq.ft. | 
+| `indus`  | proportion of non-retail business acres per town | 
+| `chas`   | Charles River dummy variable (= 1 if tract bounds river; 0 otherwise) | 
+| `nox`    | nitrogen oxides concentration (parts per 10 million) | 
+| `rm`     | average number of rooms per dwelling | 
+| `age`    | proportion of owner-occupied units built prior to 1940 | 
+| `dis`    | weighted mean of distances to five Boston employment centres | 
+| `rad`    | index of accessibility to radial highways | 
+| `tax`    | full-value property-tax rate per \$10,000 | 
+| `pt`     | ratio pupil-teacher ratio by town | 
+| `black`  | $1000(Bk−0.63)^2$ where $Bk$ is the proportion of blacks by town | 
+| `lstat`  | lower status of the population (percent) | 
+| `medv`   | median value of owner-occupied homes in \$1000s | 
+
+Separate the data into `train` and `test` datasets, with 75% of the data in the training dataset, sampled on our dependent variable `medv`:
+
+```{r}
+data <- MASS::Boston
+
+index <- createDataPartition(data$medv, p = 0.75, list = FALSE, times = 1)
+train <- data[index,]
+test  <- data[-index,]
+```
+
+## Linear regression model for comparison
+
+Calculate the linear regression model on the training set.
+
+```{r}
+lm.fit <- lm(medv ~ ., data=train)
+sjPlot::tab_model(lm.fit)
+```
+
+Make predictions on the testing set, and calculate the mean standard error:
+
+```{r}
+pr.lm <- predict(lm.fit, test)
+MSE.lm <- sum((pr.lm - test$medv)^2)/nrow(test)
+MSE.lm
+```
+
+
+## Set up a neural network
+
+### Step 1: Normalize the data
+
+```{r}
+norm.data <- data %>% 
+  # calculate the pre-process parameters from the dataset
+  preProcess(method = c("range")) %>% 
+  # transform the dataset based on the pre-processing parameters
+  predict(data)
+
+# summarize the transformed dataset to check that it worked out well
+summary(norm.data) %>% t() %>% knitr::kable()
+
+# rebuild training and testing datasets, but normalized
+norm.train <- norm.data[index,]
+norm.test  <- norm.data[-index,]
+```
+
+### Step 2: Create and train your neural net
+
+The parameter `hidden` sets up how many interior layers there are and how many neurons are inside each layer.
+
+```{r}
+nn <- neuralnet(medv ~ ., data = norm.train, hidden=c(5,3), linear.output=TRUE)
+plot(nn, rep = "best")
+```
+
+
+### Step 3: Use the trained network to make predictions on the test dataset
+
+```{r}
+pr.nn <- predict(nn, newdata = norm.test %>% select(-medv))
+```
+
+De-normalize the predictions to compare them with the actual data, and calculate the mean standard error:
+
+```{r}
+pr.nn_ <- pr.nn * (max(data$medv) - min(data$medv)) + min(data$medv)
+test.r <- norm.test$medv * (max(data$medv) - min(data$medv)) + min(data$medv)
+
+MSE.nn <- sum((test.r - pr.nn_)^2)/nrow(norm.test)
+MSE.nn
+```
+
+### Compare linear regression to neural net
+
+| Linear Model MSE | Neural Net MSE |
+|------------------|----------------|
+| `r MSE.lm`       | `r MSE.nn`     |
+
+
+Vizualize the difference:
+
+```{r}
+data.frame(
+  real = test$medv,
+  `Neuronal Net` = pr.nn_,
+  `Linear Model` = pr.lm
+) %>% 
+  gather(key = "variable", value = "Prediction", -real) %>% 
+  ggplot() +
+    aes(x = real, y = Prediction) +
+    geom_abline() +
+    geom_point() +
+    facet_wrap(~variable) +
+    labs(x = "Observed value",
+         title = "Performance comparison between methods",
+         caption = "Straight line is the 45-degree line") +
+    ggthemes::theme_tufte(base_size = 16)
+```
+
+Notice that the points are closer to the 45-degree line for the neural net than for the linear model, indicating the better prediction. This is the case especially for high values of the house prices, where the linear regression systematically under-predicts, while the neural net works well.
+
+## Repeat the analysis many times
+
+```{r}
+
+# repeat analysis 10 times
+MSE <- map_df(1:10, ~{
+  
+  # create datasets
+  index <- createDataPartition(data$medv, p = 0.75, list = FALSE, times = 1)
+  train <- data[index, ]
+  test  <- data[-index, ]
+  
+  # the linear regression
+  lm.fit <- lm(medv ~ ., data=train)
+  pr.lm <- predict(lm.fit, test)
+  MSE.lm <- sum((pr.lm - test$medv)^2)/nrow(test)
+  
+  # normalize datasets
+  norm.data <- data %>% 
+    preProcess(method = c("range")) %>% 
+    predict(data)
+  norm.train <- norm.data[index,]
+  norm.test  <- norm.data[-index,]
+  
+  # train the neural net
+  nn <- neuralnet(medv ~ ., data = norm.train, hidden=c(5,3), linear.output=TRUE)
+  
+  # make prediction
+  pr.nn <- predict(nn, newdata = norm.test %>% select(-medv))
+  
+  # de-normalize and compare to observed data
+  pr.nn_ <- pr.nn * (max(data$medv) - min(data$medv)) + min(data$medv)
+  test.r <- norm.test$medv * (max(data$medv) - min(data$medv)) + min(data$medv)
+
+  MSE.nn <- sum((test.r - pr.nn_)^2)/nrow(norm.test)
+  
+  return(data.frame(MSE.lm, MSE.nn))
+  
+  })
+
+MSE %>% knitr::kable()
+
+MSE %>% map_dbl(mean) %>% t() %>% knitr::kable()
+
+```
+
+
+The neural net indeed has systematically better predictive power than the linear regression.
+
+
+## Compare different network architectures
+
+The internal structure of the network generally affects its performance. The total number of neurons in the network is _not_ the only thing that matters. Let us explore a few network configurations with 8 neurons:
+
+- 4 hidden layers, 2 neurons each
+- 3 hidden layers, 2-4-2
+- 2 hidden layers, 4-4
+- 1 hidden layer, 8 neurons
+
+```{r}
+# create normalized dataset
+norm.data <- data %>% 
+  preProcess(method = c("range")) %>% 
+  predict(data)
+
+# repeat 100 times on 100 different test/train datasets
+MSE <- map(1:100, ~{
+
+  # create training and testing datasets
+  index <- createDataPartition(data$medv, p = 0.75, list = FALSE, times = 1)
+  norm.train <- norm.data[index,]
+  norm.test  <- norm.data[-index,]
+  
+  # try out different network architectures
+  MSE.nn.vector <- 
+    list(
+      c(2,2,2,2),
+      c(2,4,2),
+      c(4,4),
+      c(8)
+      ) %>% 
+    map_dbl(function(architecture) {
+      
+      # train the neural net
+      nn <- neuralnet(medv ~ ., data = norm.train, 
+                      hidden=architecture, linear.output=TRUE)
+  
+      # make prediction
+      pr.nn <- predict(nn, newdata = norm.test %>% select(-medv))
+  
+      # de-normalize and compare to observed data
+      pr.nn_ <- pr.nn * (max(data$medv) - min(data$medv)) + min(data$medv)
+      test.r <- norm.test$medv * (max(data$medv) - min(data$medv)) + min(data$medv)
+
+      MSE.nn <- sum((test.r - pr.nn_)^2)/nrow(norm.test)  
+      
+      return(MSE.nn)
+    })
+
+  return(MSE.nn.vector)
+  
+  })
+
+# turn list into dataframe
+MSE <- do.call(rbind.data.frame, MSE) %>% mutate_all(round,3)
+colnames(MSE) <- c("a2222", "a242", "a44", "a8")
+
+MSE %>% DT::datatable()
+```
+
+
+Calculate the average performance for each architecture:
+
+```{r}
+MSE.means <- data.frame(
+    mean  = map_dbl(MSE, mean),
+    error = map_dbl(MSE, ~{qt(0.975, df = nrow(MSE)-1) * sd(.x)/sqrt(nrow(MSE))})
+  ) %>% rownames_to_column("architecture")
+
+MSE.means %>% 
+  ggplot() +
+    aes(x = architecture, y = mean, label = round(mean,1)) +
+    geom_bar(stat="identity") +
+    geom_errorbar(aes(ymin=mean-error, ymax=mean+error), width=.2) +
+    geom_label() +
+    labs(title = "Performance differences between different network architectures",
+         caption = "Error bars show the 95% confidence intervals") +
+    ggthemes::theme_tufte(base_size = 16)
+```
+
