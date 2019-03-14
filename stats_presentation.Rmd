@@ -1,0 +1,606 @@
+---
+title: "Linear regression, statistical significance, omitted variable bias"
+author: "Vlad Tarko"
+date: "March 5, 2019"
+output: 
+  ioslides_presentation: 
+    logo: C:/Dropbox/Public/DICKINSON/DickinsonLogo.jpg
+    widescreen: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# no scientific notation
+options(scipen = 999)
+
+library(tidyverse)
+library(scales)
+library(stargazer)
+library(sjPlot)
+library(manipulateWidget)
+library(plotly)
+library(infer)
+library(rqog)
+
+qog_path <- "C:/Dropbox/Public/databases/Quality of Government Institute/2018/qog_std_cs_jan18.dta"
+```
+
+# Finding the linear regression line
+
+## Load some data
+
+[Quality of Government dataset](https://qog.pol.gu.se/data/datadownloads/qogstandarddata)
+
+```{r}
+# the standard, cross-section dataset
+# qog_path <- "http://www.qogdata.pol.gu.se/data/qog_std_cs_jan19.dta"
+qog <- rio::import(qog_path)
+
+```
+
+Summarise the data
+
+```{r, eval=FALSE}
+qog_summary <- sjmisc::descr(qog)
+```
+
+## Summarise data {.smaller}
+
+```{r echo=FALSE}
+sjmisc::descr(qog) %>% 
+  select(var, label, n, mean, sd, md) %>% 
+  DT::datatable(options = list(lengthMenu = c(3, 5, 7, 10), 
+                               pageLength = 7, 
+                               scrollX = TRUE), 
+                escape = FALSE, rownames = FALSE) %>% 
+  DT::formatRound(1:12, digits=2)
+```
+
+## A simple regression (base R)
+
+<div class="columns-2">
+
+```{r, fig.width=5}
+m1 <- qog %>% 
+  lm(log(unna_gdppc) ~ fi_legprop_pd, 
+     data = .)
+
+plot(log(qog$unna_gdppc) ~ qog$fi_legprop_pd, 
+     xlab = "Property Rights", 
+     ylab = "Log of GDP per capita")
+abline(m1)
+```
+
+</div>
+
+## A simple regression (ggplot)
+
+<div class="columns-2">
+
+```{r, fig.width=5}
+# make plot
+fig1 <- qog %>% ggplot() + 
+  aes(x = fi_legprop_pd, 
+      y = unna_gdppc, 
+      label = cname) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  scale_y_log10(labels=comma) +
+  labs(x = "Property Rights", 
+       y = "GDP per capita")
+
+#show plot
+fig1
+```
+
+</div>
+
+## Simple regression (interactive plot) {.flexbox .vcenter}
+
+```{r}
+ggplotly(fig1, tooltip = c("label", "unna_gdppc"))
+```
+
+
+
+
+# Statistical significance
+
+## Random variables -- uniform distribution
+
+<div class="columns-2">
+
+```{r, fig.width=5}
+x = runif(1000)
+y = runif(1000)
+
+plot(x, y)
+```
+
+</div>
+
+## Random variables -- normal distribution
+
+<div class="columns-2">
+
+```{r, fig.width=5}
+x = rnorm(1000, 10, 1)
+y = rnorm(1000, 10, 1)
+
+plot(x, y)
+```
+
+</div>
+
+## Random variables -- normal distribution
+
+<div class="columns-2">
+
+```{r, fig.width=5}
+data.frame(
+  x = rnorm(1000, 10, 1),
+  y = rnorm(1000, 10, 1)
+) %>% 
+  ggplot() + aes(x = x, y = y) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method="lm")
+```
+
+</div>
+
+## Means and SD of variables of interest
+
+<div class="columns-2">
+
+```{r}
+qog %>% 
+  select(unna_gdppc, fi_legprop_pd) %>% 
+  gather(key = "variable", 
+         value = "v") %>% 
+  group_by(variable) %>% 
+  summarize(obs = sum(!is.na(v)),
+            avg = mean(v, na.rm = TRUE),
+            sd  = sd(v, na.rm = TRUE)) %>% 
+  knitr::kable()
+
+```
+
+
+</div>
+
+## Random variables -- normal distribution
+
+<div class="columns-2">
+
+```{r, fig.width=5}
+data.frame(
+  prop  = rnorm(158,  5.19, 1.48),
+  gdppc = rnorm(158, 15828, 26327)
+) %>% 
+  ggplot() + aes(x = prop, y = gdppc) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method="lm") +
+    scale_y_log10(labels=comma)
+```
+
+</div>
+
+
+## Comparison
+
+<div class="columns-2">
+
+```{r echo=FALSE, fig.width=5}
+qog %>% ggplot() + 
+  aes(x = fi_legprop_pd, y = unna_gdppc, label = cname) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  scale_y_log10(labels=comma) +
+  labs(x = "Property Rights", 
+       y = "GDP per capita",
+       title = "Real data")
+```
+
+
+```{r echo=FALSE, fig.width=5}
+data.frame(
+  prop  = rnorm(158,  5.19, 1.48),
+  gdppc = rnorm(158, 15828, 26327)
+) %>% 
+  ggplot() + aes(x = prop, y = gdppc) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method="lm") +
+    scale_y_log10(labels=comma) +
+    labs(title = "Simulated")
+```
+
+</div>
+
+<!--
+
+## Play with the normal distribution
+
+```{r echo=FALSE}
+
+fig2 <- function(xM, yM, xV, yV, N) {
+  p <- data.frame(
+    x = rnorm(N, xM, xV),
+    y = rnorm(N, yM, yV)
+  ) %>% 
+    ggplot() + aes(x = x, y = y) +
+      geom_point(alpha = 0.5) +
+      geom_smooth(method="lm") +
+      xlim(0,10)
+  
+  ggplotly(p)
+}
+
+manipulateWidget(
+  
+  fig2(xM, yM, xV, yV, N),
+  
+  N  = mwSlider(10, 1000, 500, label = "Points"),
+  xM = mwSlider(1, 10, 5, label = "Mean of x"),
+  xV = mwSlider(1, 10, 1, label = "SD of x"),
+  yM = mwSlider(1, 10, 5, label = "Mean of y"),
+  yV = mwSlider(1, 10, 1, label = "SD of y")
+)
+
+```
+
+-->
+
+## Is the empirical distribution normal?
+
+<div class="columns-2">
+
+```{r, fig.width=5}
+qog %>% 
+  select(unna_gdppc, fi_legprop_pd) %>%  
+  gather(key = "variable", 
+         value = "v") %>% 
+  ggplot() + 
+    aes(x = v) +
+    geom_density() +
+    facet_wrap(~variable,
+               scales = "free")
+```
+
+</div>
+
+
+
+## Using the `infer` package
+
+<div class="columns-2">
+
+```{r, fig.width=5}
+qog %>% specify(unna_gdppc ~ fi_legprop_pd) %>% 
+  hypothesize(null = "independence") %>%
+  generate(1) %>% 
+  ungroup() %>% 
+  
+  # the simulated distributions
+  select(unna_gdppc, fi_legprop_pd) %>% 
+  gather(key = "variable", 
+         value = "v") %>% 
+  ggplot() + 
+    aes(x = v) +
+    geom_density() +
+    facet_wrap(~variable,
+               scales = "free")
+
+```
+
+</div>
+
+
+## Using the `infer` package
+
+<div class="columns-2">
+
+```{r, fig.width=5}
+qog %>% specify(unna_gdppc ~ fi_legprop_pd) %>% 
+  hypothesize(null = "independence") %>%
+  generate(4) %>% 
+  ungroup() %>% 
+  
+  # scatter plots
+  ggplot() + 
+    aes(x = fi_legprop_pd, y = unna_gdppc) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm") +
+    scale_y_log10(labels = comma) +
+    facet_wrap(~replicate) +
+    labs(x = "Property Rights", 
+         y = "GDP per capita")
+
+```
+
+</div>
+
+
+## Compare
+
+<div class="columns-2">
+
+```{r echo=FALSE, fig.width=5}
+fig1 <- qog %>% ggplot() + 
+  aes(x = fi_legprop_pd, y = unna_gdppc, label = cname) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm") +
+  scale_y_log10(labels=comma) +
+  labs(x = "Property Rights", 
+       y = "GDP per capita",
+       title = "Real data")
+
+ggplotly(fig1, tooltip = c("label", "unna_gdppc"))
+```
+
+
+```{r echo=FALSE, fig.width=5}
+qog %>% specify(unna_gdppc ~ fi_legprop_pd) %>% 
+  hypothesize(null = "independence") %>%
+  generate(4) %>% 
+  ungroup() %>% 
+  
+  # scatter plots
+  ggplot() + 
+    aes(x = fi_legprop_pd, y = unna_gdppc) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm") +
+    scale_y_log10(labels = comma) +
+    facet_wrap(~replicate) +
+    labs(x = "Property Rights", 
+         y = "GDP per capita",
+         title = "Simulated data")
+
+```
+
+</div>
+
+
+## The p-value
+
+1. Simulate the data many, many times.
+
+2. What percentage of these simulations lead to the same regression line as the one from the real data?
+
+Answer to question 2 is the _p-value_.
+
+**Common misinterpretation**: 
+
+- The p-value is the probability that the null hypothesis is false.
+- A small enough p-value means that we can be certain that the relationship between the variables is non-zero.
+
+## Bayes formula
+
+$$
+p(h|I, D) = p(h|I) \frac{p(D|h,I)}{p(D|I)}
+$$
+
+>- $h$: the hypothesis
+>- $D$: the empirical data
+>- $I$: the background information we had prior to analysing the data 
+
+## Bayes formula
+
+$$
+p(h|I, D) = p(h|I) \frac{p(D|h,I)}{p(D|I)}
+$$
+
+>- Posterior probability: $p(h|I, D)$
+>- Prior probability: $p(h|I)$
+>- Likelihood: $p(D|h,I)$ 
+>- Credibility of the data: $p(D|I)$
+
+## Bayes formula
+
+$$
+p(h|I, D) = p(h|I) \frac{\color{red}{p(D|h,I)}}{p(D|I)}
+$$
+
+- Posterior probability: $p(h|I, D)$
+- Prior probability: $p(h|I)$
+- <div class="red">Likelihood: $p(D|h,I) \longleftarrow$ **This is the p-value**</div>
+- Credibility of the data: $p(D|I)$
+
+## Bayes formula
+
+$$
+p(h|I, D) = p(h|I) \frac{p(D|h,I)}{p(D|I)}
+$$
+**Posterior prob = p-value, _only when we don't have an informative prior_**
+
+>- Why report the p-value intead of the posterior probability?
+
+>- Codifying prior knowkedge into a numeric probability is **HARD**. Calculating the likelihood (the p-value) is relatively easy.
+
+>- Consequence: Sometimes we don't find the regression results credible due to our prior probability (not included in the statistical analysis)
+
+>- Most common case: Evaluate the _sign_ of the coefficients -- do they make some intuitive sense?
+
+## The regresssion result
+
+```{r}
+reg1 <- qog %>% lm(unna_gdppc ~ fi_legprop_pd, data = .)
+tab_model(reg1, show.se = TRUE)
+```
+
+# Omitted variable bias
+
+## Generate data
+
+ - `v` is the omitted variable; 
+ - notice the 1.5 proportionality relation between `y` and `x` 
+
+```{r}
+v <- rnorm(1000)
+x <- v + rnorm(1000)
+y <- 1.5 * x + v + rnorm(1000)
+```
+
+Function `rnorm` generates random numbers from a normal distribution
+
+- `r`: random
+- `norm`: normal distribution
+
+## Plot relations: x ~ y
+
+```{r}
+plot(x, y)
+```
+
+## Plot relations: x ~ v
+
+```{r}
+plot(x, v)
+```
+
+## Plot relations: v ~ y
+
+```{r}
+plot(v, y)
+```
+
+
+## The regression showcasing the omitted variable bias
+
+Notice the coefficient of x is not 1.5
+
+```{r}
+m1 <- lm(y ~ x)
+m1
+```
+
+
+## Including the omitted variable fixes the problem
+
+Now the coefficient of x is 1.5
+
+```{r}
+m2 <- lm(y ~ x + v)
+m2
+```
+
+## Table of results
+
+```{r}
+tab_model(m1, m2)
+```
+
+## Table of results (best format)
+
+```{r}
+tab_model(m1, m2, collapse.ci = TRUE)
+```
+
+## Table of results
+
+```{r}
+tab_model(m1, m2, p.style = "asterisk", collapse.ci = TRUE)
+```
+
+## Table of results (most common)
+
+```{r}
+tab_model(m1, m2, p.style = "asterisk", 
+          show.se = TRUE, show.ci = FALSE, collapse.se = TRUE)
+```
+
+## Table of results
+
+```{r}
+tab_model(m1, m2, p.style = "asterisk", 
+          show.se = TRUE, collapse.se = TRUE)
+```
+
+## Graphical representation of results
+
+```{r}
+plot_models(m1, m2, show.values = TRUE)
+```
+
+
+## Monte Carlo simulation
+
+Repeat the analysis a 1000 times to prove that the above omitted variable bias was not an accident.
+
+```{r}
+B <- map_dbl(1:1000, function(i) {
+  
+    v <- rnorm(1000)
+    x <- v + rnorm(1000)
+    y <- 1.5 * x + v + rnorm(1000)
+    
+    lm(y ~ x)$coefficients[[2]]
+    
+  }) %>% data.frame(beta_x = .)
+```
+
+## The structure of a `lm` object
+
+```{r eval=FALSE}
+m1 <- lm(y ~ x)
+```
+
+![ ](lm_object.png)
+
+
+## Plot the result of the simulation
+
+```{r}
+ggplot(B, aes(x = beta_x)) +
+  geom_density() +
+  geom_vline(xintercept = mean(B$beta_x))
+```
+
+
+
+---
+<div class="columns-2">
+
+```{r eval=FALSE}
+# case 1: Omitted variable bias
+v <- rnorm(1000)
+x <- v + rnorm(1000)
+y <- 1.5 * x + v + rnorm(1000)
+
+
+# case 2: No bias
+v <- rnorm(1000)
+x <- rnorm(1000)
+y <- 1.5 * x + v + rnorm(1000)
+
+
+# case 3: No bias
+v <- rnorm(1000)
+x <- v + rnorm(1000)
+y <- 1.5 * x + rnorm(1000)
+```
+
+
+
+```{r echo=FALSE, fig.width=5, fig.height=2}
+# case 1
+plot_models(m1, m2, show.values = TRUE)
+
+# case 2
+v2 <- rnorm(1000)
+x2 <- rnorm(1000)
+y2 <- 1.5 * x2 + v2 + rnorm(1000)
+m3 <- lm(y2 ~ x2)
+m4 <- lm(y2 ~ x2 + v2)
+plot_models(m3, m4, show.values = TRUE)
+
+# case 3
+v3 <- rnorm(1000)
+x3 <- v3 + rnorm(1000)
+y3 <- 1.5 * x3 + rnorm(1000)
+m5 <- lm(y3 ~ x3)
+m6 <- lm(y3 ~ x3 + v3)
+plot_models(m5, m6, show.values = TRUE)
+```
+
+</div>
