@@ -1,0 +1,532 @@
+---
+title: "Comparative institutional analysis using clustering methods"
+author: "Vlad Tarko"
+date: "3/19/2019"
+output: 
+  html_document:
+    theme: readable
+    toc: true
+    toc_float: true
+---
+
+
+# General approach
+
+The analysis involves several steps:
+
+1. Choose the set of 
+  - _explanatory variables_ -- in our case, measures of institutions; 
+  - _outcomes_ you're interested in -- in our case, various measures of desirable features of a society such as income, life expectancy, education, equality, etc., as well as of some other features that may or may not be correlated with institutions, like ethnic and religious heterogeneity.
+    
+    Note: you often have some theoretical grounds on which to assume that the explanatory variables _cause_ the outcomes, but, strictly speaking, assuming such causality is not necessary -- the analysis may be purely descriptive.
+
+2. Do a cluster analysis on the set of explanatory variables. The result of this analysis will be to label each case in your dataset (in our case, each country) as belonging to a particular category (cluster).
+
+3. Calculate the means and standard errors of the outcomes of interest within each category, and see if outcomes differ from one category to another. 
+  - You can vizualize these results using bar plots with error bars.
+  - Interpretation: If the error bars made with the standard errors overlap, you can conclude that the differences between means across categories are not statistically significant. The opposite, however, is not true -- if they do not operlap you are still not sure the differences in means are statistically significant. By contrast, if you create the error bars with the confidence intervals, overlap implies nothing, but non-overlap implies statistical significance. See this [link](http://fisbio.biof.ufrj.br/restrito/bioEstatistica/90_top_especiais/errorbars_stat_significance.htm) for more info.
+
+These three steps are the standard analysis for any type of cluster analysis.
+
+With hierarchical cluster analysis you can go further and have a more complex analysis as follows:
+
+4. Do a cluster analysis on the set of outcomes. This will generate a tree showing you how similar different countries are in terms of the set of outcomes of interest.
+
+5. Calculate the correlation between the tree created by the cluster analysis on the set of institutions (step 2) and the tree created on the set of outcomes (step 4). This will tell you to what extent your set of institutions provide a good explanation for the outcomes.
+
+6. Try out different sets of explanatory variables, for instance to see which set of institutions leads to a cluster tree that best matches the cluster tree based on outcomes. Possible questions you can ask: What if we add political institutions and some measures of culture to the set of economic institutions? Will that provide a better account of the differences in outcomes between countries?
+
+In the case of regression analysis, we get some conclusion about the impact of each individual explanatory variable upon one outcome of interest (and posibly also the impact of some combination of variables, if we add interaction terms to the regression). The cluster analysis allows us to study the effects of _packages of institutions_ as a whole. The downside is that we cannot estimate what effect any one specific institutional change (to, say, one single institutional variable) would have upon the outcome. But this analysis does allow us to discover what alternative institutional packages exist, and to analyze their comparative performance -- rather than talking about comparative economic systems based on purely intuitive categories, as it is all too common.
+
+# Packages
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r}
+# for plotting trees
+library(dendextend)
+library(ape)
+
+# for visualizing kmeans results
+library(factoextra)
+
+library(tidyverse)
+
+# for calculating and plotting correlations between dendrograms
+library(corrplot)
+```
+
+# Load and explore dataset
+
+I'm using here the Quality of Government [standard dataset](https://qog.pol.gu.se/data/datadownloads/qogstandarddata).
+
+```{r cars}
+qog <- rio::import("data/qog_std_cs_jan18.dta")
+```
+
+Build summary of the dataset:
+
+```{r}
+qog_summary <- data.frame(
+    Variable    = names(qog), 
+    Description = Hmisc::label(qog), 
+    t(pastecs::stat.desc(qog)) 
+  ) %>% 
+  select(Variable, Description, Obs = nbr.val, min, median, mean, max) %>% 
+  mutate_if(is.numeric, round, 1)
+
+qog_summary %>% 
+  DT::datatable(rownames = FALSE, list(pageLength = 5), 
+                caption = "Search for things like GDP per capita, equality, corruption, democracy, education, etc.; or for data sources such as wvs_ (World Values Survey), fi_ (Fraser Institute), wdi_ (World Bank's Development Indicators), etc.") 
+```
+
+
+# Data preparation
+
+## Select explanatory variables and outcome variables
+
+Define two lists of variables, one for institutional factors and another for outcomes of interest, and create smaller dataset for our purposes
+
+```{r}
+# pick the list of variables we want to use from the QoG
+fraser <- c("fi_ftradeint_pd", "fi_legprop_pd", "fi_reg_pd", "fi_sm_pd", "fi_sog_pd")
+
+outcomes <- c(
+  # GDP per capita, growth, Gini, life expectancy
+  "unna_gdppc", "wdi_gdpcapgr", "wdi_gini", "wdi_lifexp",
+
+  # fractionalization
+  "al_ethnic", "al_religion",
+
+  # education female and male ages 35-44
+  "gea_ea3544f", "gea_ea3544m",
+
+  # corruption, public sector and political
+  "vdem_pubcorr", "vdem_corr")
+
+# prepare smaller work dataset containing institutional factors
+institutions <- qog %>% 
+  select(cname, ccodealp, fraser, outcomes)
+
+# remove rows with missing data
+institutions <- na.omit(institutions)
+
+# use row names to identify the countries
+row.names(institutions) <- institutions$cname
+
+qog_summary %>% 
+  filter(Variable %in% c(fraser, outcomes)) %>% 
+  knitr::kable()
+
+```
+
+## Scaling the data to account for differing units of measure
+
+In general, before doing the cluster analysis, you need to make sure that all your variables are measured in comparable units -- otherwise your analysis can be heavily distorted by just one variable that happens to have much larger values than the others. 
+
+In the present case, I'm using the _Fraser Institute_ data on economic institutions, and this data is already scaled -- all variables are between 1 and 10. But if you add some other instititutional factors you need to consider this possible problem.
+
+The simplest way to standardize the dataset is to use the `scale` function:
+
+```{r}
+fraser_scaled   <- institutions %>% select(fraser) %>% scale() %>% as.data.frame()
+outcomes_scaled <- institutions %>% select(outcomes) %>% scale() %>% as.data.frame()
+```
+
+
+# Hierarchical clustering
+
+## The basic analysis
+
+The cluster analysis identifies how similar two countries are to each other, either based on Euclidean distance or based on correlations. 
+
+If our case, the Euclidean distance between, say, USA and France is:
+
+$$
+\begin{align}
+d_{USA-FR}^2 =& [(Size of Govt)_{USA}-(Size of Govt)_{FR}]^2 + \\
+             & [(Deregulation)_{USA}-(Deregulation)_{FR}]^2 + \\
+             & [(Free Trade)_{USA}-(Free Trade)_{FR}]^2 + \\
+             & [(Sound Money)_{USA}-(Sound Money)_{FR}]^2 + \\
+             & [(Property Rights)_{USA}-(Property Rights)_{FR}]^2
+\end{align}
+$$
+The "ward.D" method of clustering is calculating these distances between all pairs of countries and creates the clusters such that countries within a cluster are those that have the smallest distances between each other. This is usually the best method for identifying clearly distinct categories. See [this link](http://uc-r.github.io/hc_clustering) for more information about clustering methods.
+
+Create a hierarchical cluster tree based on Euclidean distance between cases.
+
+```{r}
+
+hc <- institutions %>% 
+  select(fraser) %>%                # choose only fraser variables
+  dist(method = "euclidean") %>%    # calculate distances between pairs of countries
+  hclust(method="ward.D")           # build cluster tree
+
+```
+
+
+Plot the cluster tree (known as a "dendrogram")
+
+```{r, fig.width=10, fig.height=10}
+plot(hc, 
+     hang = -1,   # arranges labels at fixed distance
+     cex = 0.7,   # size of labels
+     main = ""
+     )
+```
+
+Plot a circular dendrogram
+
+```{r, fig.width=10, fig.height=10}
+hc %>% 
+  ape::as.phylo() %>% 
+  plot(type="fan", cex = 0.8)
+```
+
+Based on the plot we can see that there we can choose to separate the countries into 2, 3 or 4 categories. I'm going to choose 3 here.
+
+## Categorize the data based on the clusters
+
+Split the set into 3 groups and add the group number to the dataset.
+
+```{r}
+institutions <- institutions %>% 
+  mutate(groups_fraser = cutree(hc, 3)) %>% 
+  
+  # recode the group numbers to be in a better order
+  # (this was discovered by first doing the analysis without recoding)
+  mutate(groups_fraser = recode(groups_fraser, `1` = 2, `2` = 1, `3` = 3))
+```
+
+List countries in each group
+
+```{r}
+map_df(1:3, function(g){
+  institutions %>% 
+    filter(groups_fraser == g) %>% 
+    select(cname) %>% 
+    rename_at("cname", funs(paste("Group", g)))
+  }) %>% 
+  
+  # shift elements in Group 2 and 3 upwards in the table to replace the NAs
+  mutate(`Group 2` = lead(`Group 2`, length(na.omit(`Group 1`)))) %>% 
+  mutate(`Group 3` = lead(`Group 3`, length(na.omit(`Group 1`)) + 
+                                     length(na.omit(`Group 2`))
+                          )
+         ) %>% 
+  
+  # eliminate rowns that have only NAs
+  filter(!is.na(`Group 1`) | !is.na(`Group 2`) | !is.na(`Group 3`)) %>% 
+  
+  # change NAs to ""
+  mutate_all(funs(ifelse(is.na(.), "", .))) %>% 
+  
+  knitr::kable()
+```
+
+## Plot some relationships between institutions and outcomes
+
+```{r}
+institutions %>% 
+  ggplot() +
+    aes(x = fi_legprop_pd, y = log(unna_gdppc), color = factor(groups_fraser)) +
+    geom_point() +
+    labs(x = "Property rights", y = "Log of GDP per capita")
+```
+
+```{r}
+institutions %>% 
+  ggplot() +
+    aes(x = fi_legprop_pd, y = vdem_pubcorr, color = factor(groups_fraser)) +
+    geom_point() +
+    labs(x = "Property rights", y = "Corruption")
+```
+
+```{r}
+institutions %>% 
+  ggplot() +
+    aes(x = fi_legprop_pd, y = wdi_lifexp, color = factor(groups_fraser)) +
+    geom_point() +
+    labs(x = "Property rights", y = "Life expectancy")
+```
+
+```{r}
+institutions %>% 
+  ggplot() +
+    aes(x = fi_legprop_pd, y = gea_ea3544f, color = factor(groups_fraser)) +
+    geom_point() +
+    labs(x = "Property rights", y = "Education, female (35-44)")
+```
+
+```{r}
+institutions %>% 
+  ggplot() +
+    aes(x = fi_legprop_pd, y = wdi_gdpcapgr, color = factor(groups_fraser)) +
+    geom_point() +
+    labs(x = "Property rights", y = "Growth rate")
+```
+
+## Calculate summary statistics based on the cluster analysis
+
+```{r, results='asis'}
+
+# calculate means of the outcome variables for each cluster
+outcomes_means <- institutions %>%
+  group_by(groups_fraser) %>%
+  summarise_at(vars(outcomes), funs(mean)) %>%  
+  gather(key = "variable", value = "mean", -groups_fraser)
+
+# calculate the standard error 
+std.err <- function(x) { sqrt(var(x, na.rm=TRUE)/length(na.omit(x))) }
+
+# calculate standard errors (uses function `std.err` defined above)
+outcomes_se <- institutions %>%
+  group_by(groups_fraser) %>%
+  summarise_at(vars(outcomes), funs(std.err)) %>% 
+  gather(key = "variable", value = "se", -groups_fraser)
+
+outcomes_summary <- full_join(outcomes_means, outcomes_se)
+
+# show results as table
+knitr::kable(outcomes_summary, digits=2)
+```
+
+
+Show summary statistics results as bar plots
+
+```{r, fig.height=15}
+outcomes_summary %>%
+  ggplot() +
+    aes(x = groups_fraser, y = mean) +
+    geom_bar(stat = "identity") +
+    geom_errorbar(aes(ymin = mean - se, ymax = mean + se), width = 0.3) +
+    facet_wrap(~variable, scale = "free", ncol = 2)
+
+```
+
+
+
+## Compare different clustering methods
+
+```{r}
+
+## calculate hierarchical cluster
+## comparison of different clustering methods
+hc1 <- fraser_scaled %>% dist(method = "euclidean") %>% hclust(method="single")
+hc2 <- fraser_scaled %>% dist(method = "euclidean") %>% hclust(method="complete")
+hc3 <- fraser_scaled %>% dist(method = "euclidean") %>% hclust(method="average")
+hc4 <- fraser_scaled %>% dist(method = "euclidean") %>% hclust(method="mcquitty")
+hc5 <- fraser_scaled %>% dist(method = "euclidean") %>% hclust(method="median")
+hc6 <- fraser_scaled %>% dist(method = "euclidean") %>% hclust(method="centroid")
+hc7 <- fraser_scaled %>% dist(method = "euclidean") %>% hclust(method="ward.D")
+hc8 <- fraser_scaled %>% dist(method = "euclidean") %>% hclust(method="ward.D2")
+
+fraser_dendlist <- dendlist(
+  as.dendrogram(hc1),
+  as.dendrogram(hc2),
+  as.dendrogram(hc3),
+  as.dendrogram(hc4),
+  as.dendrogram(hc5),
+  as.dendrogram(hc6),
+  as.dendrogram(hc7),
+  as.dendrogram(hc8)
+)
+
+hclust_methods <- c("single", "complete", "average", "mcquitty",
+                    "median", "centroid", "ward.D", "ward.D2")
+names(fraser_dendlist) <- hclust_methods
+
+# calculate correlations
+fraser_cor <- cor.dendlist(fraser_dendlist)
+
+# plot correlation table
+corrplot.mixed(fraser_cor)
+
+```
+
+
+
+## Compare countries based on outcomes
+
+```{r, fig.width=10}
+
+hc_o1 <- outcomes_scaled %>% dist(method = "euclidean") %>% hclust(method="single")
+hc_o2 <- outcomes_scaled %>% dist(method = "euclidean") %>% hclust(method="complete")
+hc_o3 <- outcomes_scaled %>% dist(method = "euclidean") %>% hclust(method="average")
+hc_o4 <- outcomes_scaled %>% dist(method = "euclidean") %>% hclust(method="mcquitty")
+hc_o5 <- outcomes_scaled %>% dist(method = "euclidean") %>% hclust(method="median")
+hc_o6 <- outcomes_scaled %>% dist(method = "euclidean") %>% hclust(method="centroid")
+hc_o7 <- outcomes_scaled %>% dist(method = "euclidean") %>% hclust(method="ward.D")
+hc_o8 <- outcomes_scaled %>% dist(method = "euclidean") %>% hclust(method="ward.D2")
+
+outcomes_dendlist <- dendlist(
+  as.dendrogram(hc_o1),
+  as.dendrogram(hc_o2),
+  as.dendrogram(hc_o3),
+  as.dendrogram(hc_o4),
+  as.dendrogram(hc_o5),
+  as.dendrogram(hc_o6),
+  as.dendrogram(hc_o7),
+  as.dendrogram(hc_o8)
+)
+
+hclust_methods <- c("single", "complete", "average", "mcquitty",
+                    "median", "centroid", "ward.D", "ward.D2")
+names(outcomes_dendlist) <- hclust_methods
+
+# calculate correlations
+outcomes_cor <- cor.dendlist(outcomes_dendlist)
+
+# plot correlation table
+corrplot.mixed(outcomes_cor)
+
+# plot cluster
+plot(hc_o7, labels=outcomes_scaled$cname, hang=-1, cex = 0.7)
+
+```
+
+## Correlation between institutions tree and outcomes tree
+
+Which clustering method leads to the highest correlation between the tree based on institutions and the tree based on outcomes?
+
+```{r}
+
+compar_list <- dendlist(
+  as.dendrogram(hc1),
+  as.dendrogram(hc2),
+  as.dendrogram(hc3),
+  as.dendrogram(hc4),
+  as.dendrogram(hc5),
+  as.dendrogram(hc6),
+  as.dendrogram(hc7),
+  as.dendrogram(hc8),
+  as.dendrogram(hc_o1),
+  as.dendrogram(hc_o2),
+  as.dendrogram(hc_o3),
+  as.dendrogram(hc_o4),
+  as.dendrogram(hc_o5),
+  as.dendrogram(hc_o6),
+  as.dendrogram(hc_o7),
+  as.dendrogram(hc_o8)
+)
+
+names(compar_list) <- c("fraser1", "fraser2","fraser3","fraser4","fraser5",
+                        "fraser6","fraser7","fraser8",
+                        "outcomes1", "outcomes2", "outcomes3", "outcomes4",
+                        "outcomes5", "outcomes6", "outcomes7", "outcomes8")
+
+# correlations plot
+corrplot.mixed(cor.dendlist(compar_list))
+
+```
+
+> Another type of analysis that we could make: Instead of looking at different methods using the same set of variables, we can ask **which set of institutional variables leads to the highest correlation to the outcomes tree**?
+
+Visual comparison of trees, between institutions and outcomes:
+
+```{r, fig.height=7, fig.width=10}
+
+dend_fraser   <- as.dendrogram(hc7, h = 25)
+dend_outcomes <- as.dendrogram(hc_o7, h = 25)
+
+tanglegram(dend_fraser, dend_outcomes,
+           sort = TRUE,
+           common_subtrees_color_lines = FALSE,
+           highlight_distinct_edges  = FALSE,
+           highlight_branches_lwd = FALSE,
+           margin_inner = 0.5,
+           main_left = "Tree based on institutions",
+           main_right = "Tree based on outcomes")
+
+```
+
+
+# K-means clustering
+
+Check [this link](https://uc-r.github.io/kmeans_clustering) for brief intro to the theory. Unlike the case of hierarchical clustering, with k-means clustering you need to specify the number of desired clusters (k -- hence the name "k-means").
+
+This algorithm works in the following way: 
+
+1. start with $k$ randomly placed "centroids" (the centers of the clusters)
+2. allocate each case to the closest centroid
+3. move each centroid to the middle of their cluster
+4. repeat steps 2-3 until all the centroids stabilize and reach their equilibrium positions
+
+We do the k-means clustering with the function `kmeans(data, k)`:
+
+```{r}
+km <- institutions %>% 
+  select(fraser) %>% 
+  kmeans(3)
+
+km
+
+# Use the clustering vector to label the cases
+institutions <- institutions %>% mutate(kmeans = km$cluster)
+```
+
+## Visualize the results
+
+Some plots:
+
+```{r}
+institutions %>% 
+  ggplot() +
+    aes(x = fi_legprop_pd, y = gea_ea3544f, color = factor(kmeans)) +
+    geom_point() +
+    labs(x = "Property rights", y = "Education, female (35-44)")
+```
+
+```{r}
+institutions %>% 
+  ggplot() +
+    aes(x = fi_legprop_pd, y = log(unna_gdppc), color = factor(kmeans)) +
+    geom_point() +
+    labs(x = "Property rights", y = "Log of GDP per capita")
+```
+
+As you can see, the result of the k-means clustering is very similar to that of hierarchical clustering.
+
+Alternative way to visualize using the first two principal components:
+
+```{r}
+institutions %>% 
+  select(fraser) %>% 
+  fviz_cluster(km, geom = "point", data = .) + ggtitle("k = 3")
+```
+
+## Find the natural number of clusters
+
+How many clusters should we make? See which number maximizes the silhouette:
+
+```{r}
+institutions %>% 
+  select(fraser) %>% 
+  fviz_nbclust(kmeans, method = "silhouette")
+```
+
+The sihouette is a measure that takes into account both how close the different cases within a cluster are to each other and how distant the different clusters are from one another.
+
+The kmeans with 2 clusters:
+
+```{r}
+institutions %>% 
+  select(fraser) %>% 
+  kmeans(2) %>% 
+  fviz_cluster(geom = "point", 
+               data = institutions %>% select(fraser)) + ggtitle("k = 2")
+```
+
+```{r}
+institutions %>% 
+  select(fraser) %>% 
+  kmeans(8) %>% 
+  fviz_cluster(geom = "point", 
+               data = institutions %>% select(fraser)) + ggtitle("k = 8")
+```
