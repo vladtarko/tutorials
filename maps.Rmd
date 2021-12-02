@@ -1,0 +1,657 @@
+---
+title: "Making simple maps in R"
+author: "Vlad Tarko"
+date: "8/6/2019"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: yeti
+    df_print: paged
+    code_download: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+# Drawing maps with `ggplot`
+
+The step-by-step process of making a map showing some information is the following:
+
+1. Get the map data, $M$, e.g. the world map.
+2. Get the data you want to visualize, $D$, e.g. life expectancy for all countries.
+3. Make sure the region names used by the map $M$ match the names used by the data $D$. Recode all the names in $D$ that don't match.
+4. Add the variable(s) you want to visualize to the map data, by merging $M$ and $D$.
+5. Make the map using `ggplot`, using the `fill` aesthetic to show your variable of interest. All `ggplot`'s options, like color palettes, faceting (to create many maps at once) or adding more things to the map, are available to you.
+
+## Map data
+
+You can get various maps from the `maps` and `mapdata` packages, and then use the tidyverse function `map_data()` to transform the maps into `ggplot`-ready dataframes. Available maps:
+
+| Usage | Map | Package |
+|-----|------|---------|
+| "county" |  US counties | `maps` |
+| "china" | China provincial boundaries | `mapdata` |
+| "france" | France NUTS III | `maps` |
+| "italy" | Italy NUTS III | `maps` |
+| "japan" | Japan prefecture boundaries | `mapdata` |
+| "legacy_world" | World in 1990, Atlantic centered | `maps` |
+| "legacy_world2"	| World in 1990, Pacific centered | `maps` |
+| "nz" | New Zealand  | `maps` |
+| "nzHires" | New Zealand, high resolution  | `mapdata` |
+| "state" | US state boundaries | `maps` |
+| "usa" | US coast | `maps` |
+| "world" | World, present, Atlantic centered | `maps` |
+| "world2" | World, present, Pacific centered  | `maps` |
+| "worldHires" | World, present, high resolution, Atlantic centered | `mapdata` |
+| "world2Hires" | World, present, high resolution, Pacific centered  | `mapdata` |
+| "worldLores" | World, present, low resolution, Atlantic centered | `mapdata` |
+| "world2Lores" | World, present, low resolution, Pacific centered  | `mapdata` |
+
+To plot the map in `ggplot` we use the `geom_polygon` (except for China, see example below), using the variables `aes(x = long, y = lat, group = group)`. The `group` variable is needed to connect the points properly. To add information to the map we will use the `fill` variable. The `color` variable can be used for the boundaries. Finally, we use `coord_fixed(1.3)` to keep the proportions fixed (you can play with the 1.3 number)
+
+```{r}
+library(maps)
+library(mapdata)
+library(tidyverse)
+library(ggrepel)
+```
+
+
+## Examples {.tabset}
+
+### World {-}
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("world"),
+               mapping = aes(x = long, y = lat, group = group),
+               fill = "dark gray", color = "white") + 
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+### France {-}
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("france"),
+               mapping = aes(x = long, y = lat, group = group),
+               fill = "dark gray", color = "white") + 
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+
+### Italy {-}
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("italy"),
+               mapping = aes(x = long, y = lat, group = group),
+               fill = "dark gray", color = "white") + 
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+### New Zealand {-}
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("nz"),
+               mapping = aes(x = long, y = lat, group = group),
+               fill = "dark gray", color = "white") + 
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+### Japan {-}
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("japan"),
+               mapping = aes(x = long, y = lat, group = group),
+               fill = "light gray", color = "black") + 
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+### United States {-}
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("county"),
+               aes(x = long, y = lat, group = group),
+               fill = "white", color = "light gray") +
+  geom_polygon(data = map_data("state"),
+               aes(x = long, y = lat, group = group),
+               fill = NA, color = "gray") +
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+### China {-}
+
+```{r}
+ggplot() + 
+  geom_path(data = maps::map("china", plot = FALSE),
+            mapping = aes(x = long, y = lat, group = group),
+            color = "black") + 
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+
+# Adding aggregated stats to the world map
+
+We want to use the maps to show various variables. For instance, let's see how to make a world map showing the variation in life expectancy.
+
+If we look at the `map_data("world")` we see it has the following structure:
+
+```{r}
+head(map_data("world"))
+```
+
+The key to adding information to the map is to add variables to this dataset, such as the life expectancy variable, making sure you match the region name properly. 
+
+## Getting the QoG data
+
+Let's load the cross-section data from the Quality of Government Institute:
+
+```{r}
+qog <- rio::import("http://www.qogdata.pol.gu.se/dataarchive/qog_std_cs_jan18.dta")
+```
+
+The variables in the dataset:
+
+```{r}
+data.frame(
+    Variable    = names(qog), 
+    Description = sjlabelled::get_label(qog), 
+    Obs.        = map_dbl(qog, ~table(is.na(.x))[1]),
+    Missing     = map_dbl(qog, ~table(is.na(.x))[2])
+  ) %>%
+  DT::datatable(rownames = FALSE)
+```
+
+If you search for "life expectancy" you'll find several variables. I'm going to use `wdi_lifexp` which is from the World Bank.
+
+## Matching country names
+
+The main difficulty in adding this data to the map is that the `region` names in the map dataset do not match exactly the country names in the QoG data:
+
+```{r}
+# which countries in qog don't match world map names properly
+setdiff(qog$cname, map_data("world")$region)
+```
+
+
+These are the country names that we need to correct.
+
+Here are the names in the world map that don't match the QoG properly:
+
+```{r}
+# which world map names don't match countries in qog 
+setdiff(map_data("world")$region, qog$cname)
+```
+
+We can see from this list what names should've been in the QoG data. For instance, instead of "United States" it should be "USA".
+
+The most straigthforward thing to do now is to just _manually recode_ the country names in the QoG to match the names that the map uses. It's a bit tedious, but only takes a few minutes. I'm creating a new variable called `cname1` with the corrected country names:
+
+```{r}
+# recode qog cnames
+qog$cname1 <- qog$cname %>% 
+  recode("Antigua and Barbuda" = "Antigua",
+         "Congo" = "Republic of Congo",
+         "Congo, Democratic Republic" = "Democratic Republic of the Congo",
+         "Cote d'Ivoire" = "Ivory Coast",
+         "Cyprus (1975-)" = "Cyprus",
+         "Ethiopia (1993-)" = "Ethiopia",
+         "France (1963-)" = "France",
+         "Korea, North" = "North Korea",
+         "Korea, South" = "South Korea",
+         "Malaysia (1966-)" = "Malaysia",
+         "Pakistan (1971-)" = "Pakistan",
+         "St Kitts and Nevis" = "Saint Kitts",
+         "St Lucia" = "Saint Lucia",
+         "St Vincent and the Grenadines" = "Saint Vincent",
+         "Sudan (2012-)" = "Sudan",
+         "Trinidad and Tobago" = "Trinidad",
+         "Tuvalu" = "Tuvalu",  # not on map? or I can't find the proper name
+         "United Kingdom" = "UK",
+         "United States" = "USA")
+```
+
+We can now add the data to the map dataset, and plot it with `ggplot` using the `fill` variable to show the life expectancies:
+
+```{r}
+# add life expectency to the map data
+WorldMapData1 <- full_join(map_data("world"), 
+                          qog %>% select(cname1, 
+                                         wdi_gdpcappppcur, 
+                                         wdi_povgap190,
+                                         wdi_lifexp),
+                          by = c("region" = "cname1"))
+```
+
+Make the map:
+
+```{r}
+WorldMapData1 %>% 
+  ggplot() + 
+  geom_polygon(aes(x = long, y = lat, group = group, fill = wdi_gdpcappppcur)) + 
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "Average\nincomes", title = "GDP per capita, current dollars, PPP") +
+  scale_fill_binned(low = "tomato2", high = "dark blue", 
+                    trans = "log", 
+                    labels = scales::dollar_format(accuracy = 1),
+                    breaks = c(1000, 2000, 10000, 30000, 60000)) +
+  ggthemes::theme_map(base_family = "serif", base_size = 18)
+```
+
+```{r}
+WorldMapData1 %>% 
+  ggplot() + 
+  geom_polygon(aes(x = long, y = lat, group = group, fill = wdi_lifexp)) + 
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "Years", title = "Life expectancy at birth") +
+  scale_fill_binned(low = "black", high = "light gray", 
+                    #trans = "log", 
+                    labels = scales::comma) +
+  ggthemes::theme_map(base_family = "serif", base_size = 18)
+```
+
+## Automatic country names matching 
+
+The alternative to matching the names by hand is to use the function `maps::iso.expand()` which allows you to create the proper map names from standard ISO codes. The QoG contains the 3-letter ISO codes in the variable `ccodealp`. (The `maps::iso.alpha()` function does the reverse conversion, from map region names to the ISO codes.)
+
+```{r}
+qog$cname2 <- iso.expand(qog$ccodealp)
+```
+
+This creates a complication though, because the ISO codes don't have a 1-to-1 correspondence to region names on the map, and `iso.expand()` creates regex expressions. As such, you need to do a fuzzy join when you're merging the datasets:
+
+```{r}
+# add life expectency to the map data
+WorldMapData2 <- fuzzyjoin::regex_full_join(
+                          map_data("world"), 
+                          qog %>% select(cname2, wdi_gdpcappppcur),
+                          by = c("region" = "cname2"))
+```
+
+Here's the same map again:
+
+```{r}
+WorldMapData2 %>% 
+  ggplot() + 
+  geom_polygon(aes(x = long, y = lat, group = group, fill = wdi_gdpcappppcur)) + 
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "Life\nexpectancy\nat birth") +
+  scale_fill_gradient(low = "red", high = "dark blue", trans = "log")
+```
+
+## Examples: {.tabset}
+
+Of course, once you matched the country names (by one method or another), you can add any other variables from the QoG. Here's economic freedom from Fraser Institute, democracy from Freedom House, and liberal democracy from the Varieties of Democracy dataset:
+
+```{r}
+# add variables to the map data
+WorldMapData <- full_join(
+                  map_data("world"), 
+                  qog %>% select(cname1, wdi_lifexp, 
+                                 fi_index, vdem_libdem, fh_polity2),
+                  by = c("region" = "cname1")
+                )
+```
+
+I'm also illustrating different color scales, there are basically endless visual possibilities.
+
+### Economic freedom {-}
+
+```{r}
+WorldMapData %>% 
+  ggplot() + 
+  geom_polygon(aes(x = long, y = lat, group = group, fill = fi_index)) + 
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "Economic\nfreedom") +
+  scale_fill_viridis_c()
+```
+
+### Democracy (polity2, Freedom House) {-}
+
+```{r}
+WorldMapData %>% 
+  ggplot() + 
+  geom_polygon(aes(x = long, y = lat, group = group, fill = fh_polity2)) + 
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "Democracy") +
+  see::scale_fill_pizza_c() # gradient(low = "red", high = "blue")
+```
+
+
+### Liberal democracy (V-Dem) {-}
+
+```{r}
+WorldMapData %>% 
+  ggplot() + 
+  geom_polygon(aes(x = long, y = lat, group = group, fill = vdem_libdem)) + 
+  coord_fixed(1.1) +
+  theme_void() +
+  labs(fill = "Liberal\ndemocracy") +
+  ggthemes::scale_fill_continuous_tableau()
+```
+
+# Adding aggregated stats to the US states map
+
+## Loading state policies data
+
+Let's use the [Sorens, Muedini and Ruger dataset of state policies](http://www.statepolicyindex.com/data/).^[Sorens, Jason, Fait Muedini, and William P. Ruger. 2008. "State and Local Public Policies in 2006: A New Database." _State Politics and Policy Quarterly_ 8 (3): 309–26.]
+
+After you download the data and merge everything using [Jason Sorens' R script](http://www.statepolicyindex.com/data/sample-r-code-for-importing-and-merging-data-and-metadata-csv-files/), you have the following variables for all states, from 1937 to 2017:
+
+```{r}
+state_policy      <- readRDS("data/state_policies.rds")
+state_policy_meta <- readRDS("data/state_policies_meta.rds")
+```
+
+The available variables:
+
+```{r}
+state_policy_meta %>% 
+  select(Variable = `Variable Code`, Description = `Variable Name`) %>% 
+  mutate(Variable    = stringi::stri_enc_toascii(Variable),
+         Description = stringi::stri_enc_toascii(Description)) %>%
+  DT::datatable()
+```
+
+(I'm recoding the variables to ASCII to eliminate some special characters, which otherwise give an error in the `DT::datatable()`.)
+
+## Checking that state names match with map state names
+
+Before we add a variable to the map, let us first check the state names are ok. Check out the state names in the map data:
+
+```{r}
+map_data("state")$region %>% unique()
+```
+
+Notice that Alaska and Hawaii are missing, and the region names are all lower case. So let's first change the names in the `state_policy` dataset to lower case:
+
+```{r}
+state_policy$State1 <- str_to_lower(state_policy$State)
+```
+
+Let's double check that the state names match:
+
+```{r}
+setdiff(state_policy$State1, map_data("state")$region)
+```
+
+It looks like they are all good! Alaska and Hawaii don't appear on the map, because the map is only of the mainland.
+
+NOTE: If the names _didn't_ match, the `maps` package offers a handy rescue: the `state.fips` dataset gives the US Census Bureau numeric identification for the states (as well as region, etc.). Similarly, if you're plotting county-level data, there's the `county.fips` dataset with the US Census Bureau FIPS identification numbers for counties.
+
+## Adding state variables to the map
+
+Let's make maps of following variable:
+
+- `Apovrate`: Percentage of state population in poverty
+- `Apopdens`:	Population density (Apop/Aland)
+- `cpbeerc`: State average beer prices, in constant 2008 dollars
+- `cspirwet`: Percentage of state population living in counties that are wet for distilled spirits
+- `Bopen`: Open carry of loaded handgun (permitted without permit=2, permitted with permit=1, not generally permitted=0)
+
+Add the variables to the map data:
+
+```{r}
+StatesMapData <- full_join(
+                    map_data("state"), 
+                    state_policy %>% 
+                      select(State1, Year,
+                             Apovrate, Apopdens, 
+                             cpbeerc, cspirwet, 
+                             Bopen),
+                    by = c("region" = "State1")
+                  )
+```
+
+## Examples: {.tabset}
+
+### Poverty {-}
+
+```{r, fig.height=7}
+StatesMapData %>%
+  filter(Year >= 1980) %>% 
+  filter(Year %% 5 == 0) %>% 
+  drop_na(Year) %>% 
+
+ggplot() + 
+  geom_polygon(aes(x = long, y = lat, group = group, fill = Apovrate)) +
+  coord_fixed(1.3) +
+  theme_void() +
+  labs(fill = "Poverty\nrate") +
+  scale_fill_gradient(low = "dark blue", high = "red") +
+  facet_wrap(~Year, ncol = 2) +
+  theme(legend.position = "bottom", legend.direction = "horizontal")
+```
+
+### Population density {-}
+
+```{r}
+ggplot() + 
+  geom_polygon(data = StatesMapData %>% filter(Year == 2015),
+               aes(x = long, y = lat, group = group, fill = Apopdens),
+               color = "light gray") +
+  coord_fixed(1.3) +
+  theme_void() +
+  labs(fill = "Population\ndensity") +
+  scale_fill_continuous(trans = "log", labels = scales::comma)
+```
+
+### Beer prices {-}
+
+```{r}
+ggplot() + 
+  geom_polygon(data = StatesMapData %>% filter(Year == 2003),
+               aes(x = long, y = lat, group = group, fill = cpbeerc),
+               color = "gray") +
+  coord_fixed(1.3) +
+  theme_void() +
+  labs(fill = "Beer\nprices") +
+  scale_fill_gradient(low = "dark blue", high = "red")
+```
+
+### Wet counties (spirits) {-}
+
+```{r}
+StatesMapData %>% filter(Year %in% c(1967, 1984)) %>% 
+
+ggplot() + 
+  geom_polygon(aes(x = long, y = lat, group = group, fill = cspirwet),
+               color = "gray") +
+  coord_fixed(1.3) +
+  scale_fill_gradient(low = "red", high = "dark blue") +
+  labs(fill = "Wet counties:\n") +
+  theme_void() +
+  theme(legend.position = "bottom", legend.direction = "horizontal") +
+  facet_wrap(~Year)
+```
+
+### Open carry {-}
+
+```{r, fig.height=7}
+StatesMapData %>% 
+  filter(Year %% 5 == 0) %>% 
+  drop_na(Bopen) %>% 
+  mutate(Bopen = recode(Bopen,
+    `2` = "permitted without permit",
+    `1` = "permitted with permit", 
+    `0` = "not generally permitted"
+  )) %>% 
+
+ggplot() + 
+  geom_polygon(aes(x = long, y = lat, group = group, fill = Bopen),
+               color = "gray") +
+  coord_fixed(1.3) +
+  theme_void() +
+  labs(fill = "Open carry:") +
+  see::scale_fill_flat_d(reverse = TRUE) +
+  facet_wrap(~Year, ncol = 2) +
+  theme(legend.position = "top", legend.direction = "horizontal")
+```
+
+# Adding cities to the map
+
+We can add things to the map in standard `ggplot` fashion -- using additional geoms. For example, let me _manually_ add Tucson and Denver to the US map.
+
+First, google the latitude and longitude of the cities and then add the information to a dataframe:
+
+```{r}
+cities <- tribble(
+      ~long,    ~lat,      ~name,
+  -110.9747,   32.2226, "Tucson",
+  -104.9903,   39.7392, "Denver"
+  )
+```
+
+Now we can just add them to the US map:
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("usa"),
+               mapping = aes(x = long, y = lat, group = group),
+               fill = "light gray", color = "light gray") + 
+  geom_point(data = cities, aes(x = long, y = lat), color = "black") +
+  geom_text(data = cities, aes(x = long, y = lat, label = name), nudge_y = 1) +
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+But we can do better than add the cities manually. The `maps` package also contains a few dataframes of cities locations.
+
+| Dataset | Description |
+|-------|-------------|
+| `canada.cities`	| Canadian cities larger than 1,000 |
+| `us.cities`	| US cities larger than 40,000 |
+| `world.cities` | World cities larger than 40,000 |
+
+Here is the structure of the `world.cities` data frame:
+
+```{r}
+head(world.cities)
+```
+
+Let's add all US cities greater than half a million people to the map:
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("usa"),
+               aes(x = long, y = lat, group = group),
+               fill = "light gray", color = "light gray") + 
+  geom_point(data = us.cities %>% filter(pop > 500000),
+             aes(x = long, y = lat)) +
+  geom_text_repel(data = us.cities %>% filter(pop > 500000),
+            aes(x = long, y = lat, label = name)) +
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+Here are all world cities larger than one million, with labels for cities greater than 5 million:
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("world"),
+               aes(x = long, y = lat, group = group),
+               fill = "light gray", color = "white") + 
+  geom_point(data = world.cities %>% filter(pop > 1000000),
+             aes(x = long, y = lat), color = "dark gray") +
+  geom_text_repel(data = world.cities %>% filter(pop > 5000000),
+            aes(x = long, y = lat, label = name), color = "black") +
+  coord_fixed(1.3) +
+  theme_void()
+```
+
+
+## Zooming in on the map
+
+We can zoom in by specifying the limits of the map in the `coord_fixed()` option. The high resolution `mapHires` is useful particularly for zooming in, but I'm still using the regular map here. Here's for example a zoom on China:
+
+```{r}
+ggplot() + 
+  geom_polygon(data = map_data("world"),
+               aes(x = long, y = lat, group = group),
+               fill = "light gray", color = "white") + 
+  geom_point(data = world.cities %>% filter(pop > 500000, country.etc == "China"),
+             aes(x = long, y = lat), color = "dark gray") +
+  geom_text_repel(data = world.cities %>% filter(pop > 2000000, country.etc == "China"),
+            aes(x = long, y = lat, label = name), color = "black") +
+  coord_fixed(1.3, xlim = c(75, 135), ylim = c(20, 50)) +
+  theme_void()
+```
+
+I got the limits from [this map](https://www.mapsofworld.com/lat_long/china-lat-long.html). Notice that I've also changed what cities to show: I'm now showing all Chinese cities greater than half a million, and labeling all cities greater than 2 million.
+
+# Adding detailed information to a map
+
+Let's plot the crime rates in various places, with data taken from the [Open Crime Database](https://osf.io/zyaqn/). This data is even more precise than the county-level.
+
+```{r}
+library(crimedata)
+```
+
+Get a small sample of the available crime data, using the "simple features" (sf) output option:
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+crime <- get_crime_data(type = "sample", quiet = TRUE, output = "sf")
+```
+
+```{r eval=FALSE}
+crime <- get_crime_data(type = "sample", quiet = TRUE, output = "sf")
+```
+
+This is how the data looks like:
+
+```{r}
+head(crime)
+```
+
+Let us consider only the robberies and focus on Los Angeles:
+
+```{r}
+crimeLA <- crime %>% 
+  filter(offense_group == "robbery", city_name == "Los Angeles") 
+```
+
+```{r}
+map_data("county") %>%
+  filter(subregion == "los angeles") %>%
+  ggplot() +
+    geom_polygon(aes(x = long, y = lat, group = group),
+                 fill = "light gray", color = "white") +
+    geom_sf(data = crimeLA) 
+```
+
+Make a map showing robberies density:
+
+```{r}
+ggplot() +
+  geom_polygon(data = map_data("state"), 
+               aes(x = long, y = lat, group = group),
+               color = "white", fill = "light gray") +
+  geom_count(data = crime %>% filter(offense_group == "robbery"),
+                  aes(x = longitude, y = latitude),
+             alpha = 0.5) +
+  theme_void()
+```
+
