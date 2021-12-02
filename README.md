@@ -7,3 +7,5 @@
 [Comparative institutional analysis using clustering methods](http://vladtarko.github.io/tutorials/cluster_analysis.html)
 
 [All faceting options in ggplot](http://vladtarko.github.io/tutorials/ggplot-faceting-tutorial.html)
+
+[Maps in ggplot](http://vladtarko.github.io/tutorials/maps.html)
